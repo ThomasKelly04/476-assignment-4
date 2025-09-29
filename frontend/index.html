@@ -1,0 +1,264 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Minimal DIDLab DApp</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; padding: 20px; max-width: 900px; margin: auto; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03);}
+    label { display:block; margin-top:8px; font-weight:600; }
+    input[type=text], input[type=number] { width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; }
+    button { padding:10px 14px; border-radius:6px; border: none; background:#2563eb; color:white; cursor:pointer; }
+    button:disabled { background:#aaa; }
+    pre { background:#f7f7f7; padding:10px; border-radius:6px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h1>Minimal DIDLab DApp — ERC20</h1>
+
+  <div class="card" id="walletCard">
+    <div id="accountInfo">Not connected</div>
+    <button id="connectBtn">Connect MetaMask</button>
+    <button id="switchBtn">Add / Switch DIDLab Chain</button>
+  </div>
+
+  <div class="card">
+    <label>Token Address (stored in localStorage)</label>
+    <input id="tokenAddr" placeholder="0x..." />
+    <div style="margin-top:8px">
+      <button id="loadTokenBtn">Load Token</button>
+      <button id="addTokenBtn">Add token to MetaMask</button>
+    </div>
+    <div id="tokenMeta" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h3>Balance</h3>
+    <div id="balance">—</div>
+    <button id="refreshBalance">Refresh</button>
+  </div>
+
+  <div class="card">
+    <h3>Transfer</h3>
+    <label>Recipient</label>
+    <input id="toAddr" placeholder="0x..." />
+    <label>Amount (human)</label>
+    <input id="amount" type="number" placeholder="1.0" />
+    <div style="margin-top:8px">
+      <button id="transferBtn">Send Transfer</button>
+    </div>
+    <div id="txInfo" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h3>Debug / Logs</h3>
+    <pre id="log"></pre>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.9.1/dist/ethers.umd.min.js"></script>
+<script>
+const logEl = document.getElementById('log');
+function log(...args){ logEl.textContent = args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' ') + "\n" + logEl.textContent; }
+
+// Local storage token key
+const LS_KEY = 'dapp_token_addr';
+
+// Elements
+const connectBtn = document.getElementById('connectBtn');
+const switchBtn = document.getElementById('switchBtn');
+const accountInfo = document.getElementById('accountInfo');
+const tokenAddrInput = document.getElementById('tokenAddr');
+const loadTokenBtn = document.getElementById('loadTokenBtn');
+const tokenMetaEl = document.getElementById('tokenMeta');
+const addTokenBtn = document.getElementById('addTokenBtn');
+const balanceEl = document.getElementById('balance');
+const refreshBtn = document.getElementById('refreshBalance');
+const toAddrInput = document.getElementById('toAddr');
+const amountInput = document.getElementById('amount');
+const transferBtn = document.getElementById('transferBtn');
+const txInfo = document.getElementById('txInfo');
+
+let provider, signer, account;
+let tokenContract;
+let tokenMeta = {};
+
+// Load saved address
+tokenAddrInput.value = localStorage.getItem(LS_KEY) || '';
+
+async function ensureProvider() {
+  if (!window.ethereum) {
+    alert("MetaMask (or compatible wallet) not found in browser.");
+    throw new Error("No wallet");
+  }
+  provider = new ethers.BrowserProvider(window.ethereum);
+  signer = await provider.getSigner();
+}
+
+async function connectWallet() {
+  await ensureProvider();
+  try {
+    const accs = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    account = accs[0];
+    accountInfo.textContent = "Connected: " + account;
+    log("Connected", account);
+  } catch (e) { log("connect error", e); }
+}
+
+connectBtn.onclick = connectWallet;
+
+async function switchToDidLab() {
+  // The DIDLab chain info should be provided by the user in a config file or entered manually.
+  // We attempt to read /frontend/token-config.json for chain info saved by deploy script (not present by default).
+  // For the wallet method we need hex chainId. Ask user to paste chain id if not present.
+  let chainIdDecimal = localStorage.getItem('DIDLAB_CHAINID') || null;
+  let rpc = localStorage.getItem('DIDLAB_RPC') || null;
+  if (!chainIdDecimal) {
+    chainIdDecimal = prompt("Enter DIDLab chain id (decimal)", "1337");
+    if (!chainIdDecimal) return;
+    localStorage.setItem('DIDLAB_CHAINID', chainIdDecimal);
+  }
+  if (!rpc) {
+    rpc = prompt("Enter DIDLab RPC URL (http...)", "");
+    if (!rpc) { alert("RPC required to add network"); return; }
+    localStorage.setItem('DIDLAB_RPC', rpc);
+  }
+  const hexChainId = '0x' + parseInt(chainIdDecimal).toString(16);
+  try {
+    await window.ethereum.request({
+      method: 'wallet_addEthereumChain',
+      params: [{
+        chainId: hexChainId,
+        chainName: 'DIDLab Team Chain',
+        nativeCurrency: { name: 'DIDLabCoin', symbol: 'DID', decimals: 18 },
+        rpcUrls: [rpc],
+        blockExplorerUrls: []
+      }]
+    });
+    log('Switched/Added DIDLab', hexChainId);
+  } catch (e) {
+    log('Failed to add/switch chain', e);
+    alert("Failed to add/switch network: " + (e && e.message));
+  }
+}
+
+switchBtn.onclick = switchToDidLab;
+
+async function loadToken(addr) {
+  if (!addr) { alert("Provide token address"); return; }
+  try {
+    await ensureProvider();
+    tokenContract = new ethers.Contract(addr, [
+      "function name() view returns (string)",
+      "function symbol() view returns (string)",
+      "function decimals() view returns (uint8)",
+      "function balanceOf(address) view returns (uint256)",
+      "function transfer(address to, uint256 amount) returns (bool)",
+      "event Transfer(address indexed from, address indexed to, uint256 value)"
+    ], signer);
+    const name = await tokenContract.name();
+    const symbol = await tokenContract.symbol();
+    const decimals = await tokenContract.decimals();
+    tokenMeta = { address: addr, name, symbol, decimals: Number(decimals) };
+    tokenMetaEl.innerHTML = `<strong>${name}</strong> (${symbol}) — decimals: ${decimals}`;
+    localStorage.setItem(LS_KEY, addr);
+    log('Token loaded', tokenMeta);
+    // auto refresh balance
+    await refreshBalance();
+    // listen for Transfer events touching our account
+    tokenContract.on("Transfer", (from, to, value, event) => {
+      if (!account) return;
+      if (from.toLowerCase() === account.toLowerCase() || to.toLowerCase() === account.toLowerCase()) {
+        log('Transfer event touched account, refreshing balance');
+        refreshBalance();
+      }
+    });
+  } catch (e) {
+    log('Failed to load token', e);
+    alert("Failed to load token. Check address & network.");
+  }
+}
+
+loadTokenBtn.onclick = () => loadToken(tokenAddrInput.value.trim());
+addTokenBtn.onclick = async () => {
+  if (!tokenMeta.address) { alert("Load token first"); return; }
+  try {
+    const added = await window.ethereum.request({
+      method: 'wallet_watchAsset',
+      params: {
+        type: 'ERC20',
+        options: {
+          address: tokenMeta.address,
+          symbol: tokenMeta.symbol,
+          decimals: tokenMeta.decimals,
+          image: ''
+        }
+      }
+    });
+    log('Requested token add', added);
+  } catch (e) {
+    log('Add token failed', e);
+  }
+};
+
+async function refreshBalance() {
+  if (!tokenContract) { balanceEl.textContent = 'Load token first'; return; }
+  try {
+    const addr = account || (await provider.listAccounts())[0];
+    if (!addr) { balanceEl.textContent = 'Wallet not connected'; return; }
+    const raw = await tokenContract.balanceOf(addr);
+    const decimals = tokenMeta.decimals || 18;
+    const human = ethers.formatUnits(raw, decimals);
+    balanceEl.textContent = human + ' ' + tokenMeta.symbol + ' (' + raw + ' wei)';
+    log('Balance', human);
+  } catch (e) {
+    log('Balance error', e);
+    balanceEl.textContent = 'Error reading balance';
+  }
+}
+
+refreshBtn.onclick = refreshBalance;
+
+transferBtn.onclick = async () => {
+  if (!tokenContract) { alert("Load token first"); return; }
+  const to = toAddrInput.value.trim();
+  const amt = amountInput.value;
+  if (!to || !amt) { alert("Provide to address and amount"); return; }
+  try {
+    const decimals = tokenMeta.decimals || 18;
+    const value = ethers.parseUnits(amt.toString(), decimals);
+    const tx = await tokenContract.transfer(to, value);
+    log('Sent tx', tx);
+    txInfo.innerHTML = 'Submitted tx: ' + tx.hash;
+    const receipt = await tx.wait();
+    txInfo.innerHTML = 'Mined in block ' + receipt.blockNumber + ' — gasUsed: ' + (receipt.gasUsed ? receipt.gasUsed.toString() : 'n/a');
+    log('Receipt', receipt);
+    // refresh balance
+    await refreshBalance();
+  } catch (e) {
+    log('Transfer error', e);
+    alert('Transfer failed: ' + (e && e.message));
+  }
+};
+
+// If a saved token exists, try auto-load on page load
+window.addEventListener('load', async () => {
+  try {
+    if (tokenAddrInput.value) await loadToken(tokenAddrInput.value);
+    if (window.ethereum) {
+      window.ethereum.on('accountsChanged', (acs) => {
+        account = acs[0];
+        accountInfo.textContent = account ? 'Connected: ' + account : 'Not connected';
+        log('Accounts changed', acs);
+        refreshBalance();
+      });
+      window.ethereum.on('chainChanged', (ch) => {
+        log('Chain changed', ch);
+        refreshBalance();
+      });
+    }
+  } catch (e) { console.error(e); }
+});
+</script>
+</body>
+</html>

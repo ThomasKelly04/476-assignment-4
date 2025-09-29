@@ -1,0 +1,20 @@
+{
+  "name": "minimal-dapp-hardhat-v3",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "install-all": "npm install",
+    "compile": "npx hardhat compile",
+    "deploy:didlab": "npx hardhat run scripts/deploy.js --network didlab",
+    "start": "npx serve frontend -p 3000"
+  },
+  "devDependencies": {
+    "hardhat": "^3.0.0",
+    "dotenv": "^16.0.0",
+    "serve": "^14.2.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^4.9.3"
+  }
+}
+
